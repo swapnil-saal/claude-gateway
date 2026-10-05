@@ -16,6 +16,22 @@ Why it exists: personal tools and side projects that want a plain chat API, with
 you already pay for. It is **for personal use on your own machine**. It is not a way to
 share or resell a subscription, and it must never be exposed to the internet.
 
+## Quick start
+
+```sh
+git clone https://github.com/<you>/claude-gateway && cd claude-gateway
+uv sync
+uv run claude-gateway            # runs in this terminal; Ctrl+C stops it
+```
+
+On first start it creates `~/.claude-gateway/token`, the key your apps send. Print it with
+`uv run claude-gateway token`, then point an SDK at `http://127.0.0.1:8787` (Anthropic) or
+`http://127.0.0.1:8787/v1` (OpenAI) with that value as the API key. Interactive docs are at
+http://127.0.0.1:8787/docs.
+
+To keep it running in the background instead, `uv run claude-gateway install` registers it
+as a login service; `stop`, `start`, `status`, `logs -f` and `uninstall` manage it from then on.
+
 ## Requirements
 
 - macOS or Linux. Windows can run the server in the foreground only.
