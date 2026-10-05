@@ -282,6 +282,15 @@ class Registry:
         for sid in list(self.sessions):
             self.drop_session(sid)
 
+    async def aclose(self):
+        """Shut down and wait for every Claude Code process to exit, so none outlive the gateway."""
+        workers = [w for p in self.pools.values() for w in p.idle] + [s.worker for s in self.sessions.values()]
+        for p in self.pools.values():
+            p.idle.clear()
+            p.spares = 0
+        self.sessions.clear()
+        await asyncio.gather(*(w._close() for w in workers), return_exceptions=True)
+
     def stats(self):
         return {
             "pools": [{"key": p.key, "idle": len(p.idle), "spawning": p.spawning, "spares": p.spares, "uses": p.uses,

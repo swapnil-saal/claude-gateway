@@ -42,7 +42,7 @@ async def lifespan(_app):
     log.info("claude-gateway on http://%s:%s (token in %s)", config.HOST, config.PORT, config.HOME / "token")
     yield
     reaper.cancel()
-    registry.close()
+    await registry.aclose()
 
 
 app = FastAPI(title="claude-gateway", version="0.1.0", description=docs.DESCRIPTION, openapi_tags=docs.TAGS,

@@ -1,21 +1,21 @@
 """The `claude-gateway` command.
 
-    claude-gateway                 run in the foreground (same as `serve`)
-    claude-gateway install         run as a login service: starts now, at every login, restarts on crash
-    claude-gateway uninstall       stop and remove the login service (keeps the token and logs)
-    claude-gateway start|stop|restart
-    claude-gateway status          service state, health, warm processes, sessions, plan limits
+    claude-gateway                 run in the foreground (same as `serve`); Ctrl+C stops it
+    claude-gateway start           run in the background
+    claude-gateway stop            stop the background server
+    claude-gateway restart
+    claude-gateway status          process, health, warm processes, sessions, plan limits
     claude-gateway logs [-f] [-n N]
     claude-gateway token           print the API token clients should send
 
-macOS uses a launchd agent, Linux a systemd user unit. Settings are read from
-CLAUDE_GATEWAY_* environment variables; `install` captures the ones set when it runs.
+The background server writes its pid to ~/.claude-gateway/gateway.pid and its output to
+~/.claude-gateway/gateway.log. It does not start again after a reboot; run `start` again.
+Settings come from CLAUDE_GATEWAY_* environment variables, read when the server starts.
 """
 import argparse
 import json
 import os
-import platform
-import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -24,9 +24,8 @@ import urllib.request
 
 from . import config
 
-LABEL = "com.claude-gateway"
-UNIT = "claude-gateway"
 LOG = config.HOME / "gateway.log"
+PIDFILE = config.HOME / "gateway.pid"
 
 
 def _base():
@@ -46,158 +45,22 @@ def _healthy() -> dict | None:
         return None
 
 
-def _wait_healthy(seconds=40) -> bool:
+def _wait(cond, seconds=40) -> bool:
     for _ in range(seconds * 2):
-        if _healthy():
+        if cond():
             return True
         time.sleep(0.5)
     return False
 
 
-def _env() -> dict[str, str]:
-    """Environment the service runs with: our settings, plus PATH so Claude Code finds its helpers."""
-    env = {k: v for k, v in os.environ.items() if k.startswith("CLAUDE_GATEWAY_")}
-    env["PATH"] = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
-    if "HOME" in os.environ:
-        env["HOME"] = os.environ["HOME"]
-    return env
-
-
-def _program() -> list[str]:
-    # The interpreter this command runs under has the package installed, whether via
-    # `uv run`, `uv tool install` or a plain venv.
-    return [sys.executable, "-m", "gateway", "serve"]
-
-
-# ---------------------------------------------------------------- macOS (launchd)
-class Launchd:
-    plist = os.path.expanduser(f"~/Library/LaunchAgents/{LABEL}.plist")
-
-    @property
-    def domain(self):
-        return f"gui/{os.getuid()}"
-
-    def _write(self):
-        def xml(s):
-            return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        args = "".join(f"    <string>{xml(a)}</string>\n" for a in _program())
-        env = "".join(f"    <key>{k}</key><string>{xml(v)}</string>\n" for k, v in _env().items())
-        os.makedirs(os.path.dirname(self.plist), exist_ok=True)
-        with open(self.plist, "w") as f:
-            f.write(f"""<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>{LABEL}</string>
-  <key>ProgramArguments</key><array>
-{args}  </array>
-  <key>EnvironmentVariables</key><dict>
-{env}  </dict>
-  <key>WorkingDirectory</key><string>{config.HOME}</string>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>{LOG}</string>
-  <key>StandardErrorPath</key><string>{LOG}</string>
-</dict></plist>
-""")
-
-    def installed(self):
-        return os.path.exists(self.plist)
-
-    def install(self):
-        self._write()
-        self.start()
-
-    def uninstall(self):
-        self.stop()
-        if self.installed():
-            os.remove(self.plist)
-
-    def start(self):
-        if not self.installed():
-            sys.exit("not installed: run `claude-gateway install` first")
-        subprocess.run(["launchctl", "bootstrap", self.domain, self.plist], capture_output=True)
-        subprocess.run(["launchctl", "kickstart", f"{self.domain}/{LABEL}"], capture_output=True)
-
-    def stop(self):
-        subprocess.run(["launchctl", "bootout", f"{self.domain}/{LABEL}"], capture_output=True)
-
-    def restart(self):
-        r = subprocess.run(["launchctl", "kickstart", "-k", f"{self.domain}/{LABEL}"], capture_output=True)
-        if r.returncode:
-            self.start()
-
-    def pid(self) -> int | None:
-        r = subprocess.run(["launchctl", "print", f"{self.domain}/{LABEL}"], capture_output=True, text=True)
-        for line in r.stdout.splitlines():
-            if line.strip().startswith("pid = "):
-                return int(line.split("=")[1])
+def _pid() -> int | None:
+    """Pid of the background server, if the one we recorded is still alive."""
+    try:
+        pid = int(PIDFILE.read_text().strip())
+        os.kill(pid, 0)
+        return pid
+    except (FileNotFoundError, ValueError, ProcessLookupError, PermissionError):
         return None
-
-
-# ---------------------------------------------------------------- Linux (systemd --user)
-class Systemd:
-    unit = os.path.expanduser(f"~/.config/systemd/user/{UNIT}.service")
-
-    def _ctl(self, *args, check=False):
-        return subprocess.run(["systemctl", "--user", *args], capture_output=True, text=True, check=check)
-
-    def _write(self):
-        env = "".join(f"Environment={k}={v}\n" for k, v in _env().items())
-        os.makedirs(os.path.dirname(self.unit), exist_ok=True)
-        with open(self.unit, "w") as f:
-            f.write(f"""[Unit]
-Description=claude-gateway: Anthropic and OpenAI compatible API on your Claude Code login
-After=network.target
-
-[Service]
-ExecStart={" ".join(_program())}
-WorkingDirectory={config.HOME}
-Restart=always
-RestartSec=2
-StandardOutput=append:{LOG}
-StandardError=append:{LOG}
-{env}
-[Install]
-WantedBy=default.target
-""")
-
-    def installed(self):
-        return os.path.exists(self.unit)
-
-    def install(self):
-        self._write()
-        self._ctl("daemon-reload")
-        self._ctl("enable", "--now", UNIT)
-
-    def uninstall(self):
-        self._ctl("disable", "--now", UNIT)
-        if self.installed():
-            os.remove(self.unit)
-        self._ctl("daemon-reload")
-
-    def start(self):
-        if not self.installed():
-            sys.exit("not installed: run `claude-gateway install` first")
-        self._ctl("start", UNIT)
-
-    def stop(self):
-        self._ctl("stop", UNIT)
-
-    def restart(self):
-        self._ctl("restart", UNIT)
-
-    def pid(self) -> int | None:
-        r = self._ctl("show", "-p", "MainPID", "--value", UNIT)
-        return int(r.stdout.strip() or 0) or None
-
-
-def service():
-    system = platform.system()
-    if system == "Darwin":
-        return Launchd()
-    if system == "Linux" and shutil.which("systemctl"):
-        return Systemd()
-    sys.exit(f"login services are supported on macOS and Linux (systemd); on {system} run `claude-gateway serve`")
 
 
 # ---------------------------------------------------------------- commands
@@ -207,50 +70,68 @@ def cmd_serve(_args):
     uvicorn.run(app, host=config.HOST, port=config.PORT, log_level="info")
 
 
-def cmd_install(_args):
-    svc = service()
-    if _healthy() and not svc.pid():
-        sys.exit(f"something else is already listening on {_base()}; stop it first")
-    svc.install()
-    if not _wait_healthy():
-        sys.exit(f"the service did not come up; see `claude-gateway logs` ({LOG})")
-    print(f"claude-gateway running on {_base()}  (starts at login, restarts on crash)")
+def cmd_start(_args):
+    if pid := _pid():
+        sys.exit(f"already running (pid {pid}) on {_base()}")
+    if _healthy():
+        sys.exit(f"something is already answering on {_base()}; stop it first")
+    config.HOME.mkdir(parents=True, exist_ok=True)
+    with open(LOG, "a") as log:
+        # Its own session, so closing this terminal does not take it down.
+        proc = subprocess.Popen([sys.executable, "-m", "gateway", "serve"], stdout=log, stderr=log,
+                                stdin=subprocess.DEVNULL, start_new_session=True, cwd=config.HOME)
+    PIDFILE.write_text(f"{proc.pid}\n")
+    if not _wait(lambda: _healthy() or proc.poll() is not None) or proc.poll() is not None:
+        PIDFILE.unlink(missing_ok=True)
+        sys.exit(f"did not come up; see `claude-gateway logs` ({LOG})")
+    print(f"claude-gateway running on {_base()} (pid {proc.pid})")
     print(f"token: {config.TOKEN}")
     print(f"logs:  {LOG}")
 
 
-def cmd_uninstall(_args):
-    service().uninstall()
-    print(f"claude-gateway stopped and removed; token and logs kept in {config.HOME}")
-
-
-def cmd_start(_args):
-    service().start()
-    print("running on " + _base() if _wait_healthy() else f"did not come up; see `claude-gateway logs`")
-
-
 def cmd_stop(_args):
-    service().stop()
-    for _ in range(20):
-        if not _healthy():
+    pid = _pid()
+    if not pid:
+        PIDFILE.unlink(missing_ok=True)
+        if _healthy():
+            sys.exit(f"{_base()} is answering, but it was not started with `claude-gateway start`; "
+                     "stop it where it runs (Ctrl+C in its terminal)")
+        print("not running")
+        return
+    os.kill(pid, signal.SIGTERM)               # uvicorn shuts down cleanly and closes the Claude Code processes
+
+    def gone():
+        try:
+            os.kill(pid, 0)
+            return False
+        except ProcessLookupError:
+            return True
+    if not _wait(gone, 15):
+        os.kill(pid, signal.SIGKILL)
+    for sig in (signal.SIGTERM, signal.SIGKILL):   # anything left in its process group (Claude Code children)
+        try:
+            os.killpg(pid, sig)
+            time.sleep(1)
+        except ProcessLookupError:
             break
-        time.sleep(0.5)
-    print("stopped" if not _healthy() else "still answering: it may be running outside the service")
+    PIDFILE.unlink(missing_ok=True)
+    print("stopped")
 
 
-def cmd_restart(_args):
-    service().restart()
-    print("running on " + _base() if _wait_healthy() else f"did not come up; see `claude-gateway logs`")
+def cmd_restart(args):
+    if _pid():
+        cmd_stop(args)
+    cmd_start(args)
 
 
 def cmd_status(_args):
-    try:
-        svc, pid = service(), service().pid()
-        print(f"service:  {'installed' if svc.installed() else 'not installed'}"
-              + (f", running (pid {pid})" if pid else ", not running"))
-    except SystemExit as e:
-        print(f"service:  {e}")
-    health = _healthy()
+    pid, health = _pid(), _healthy()
+    if pid:
+        print(f"process:  running in the background (pid {pid})")
+    elif health:
+        print("process:  running, but not started with `claude-gateway start` (foreground or another tool)")
+    else:
+        print("process:  not running")
     if not health:
         print(f"endpoint: {_base()} not answering")
         return
@@ -291,7 +172,7 @@ def main(argv=None):
     p = argparse.ArgumentParser(prog="claude-gateway", description=__doc__.split("\n\n")[0],
                                 formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
     sub = p.add_subparsers(dest="cmd")
-    for name in ("serve", "install", "uninstall", "start", "stop", "restart", "status", "token"):
+    for name in ("serve", "start", "stop", "restart", "status", "token"):
         sub.add_parser(name)
     logs = sub.add_parser("logs")
     logs.add_argument("-f", "--follow", action="store_true")

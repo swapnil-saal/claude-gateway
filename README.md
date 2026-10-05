@@ -21,7 +21,8 @@ share or resell a subscription, and it must never be exposed to the internet.
 ```sh
 git clone https://github.com/<you>/claude-gateway && cd claude-gateway
 uv sync
-uv run claude-gateway            # runs in this terminal; Ctrl+C stops it
+uv run claude-gateway start      # runs in the background
+uv run claude-gateway stop       # ...until this
 ```
 
 On first start it creates `~/.claude-gateway/token`, the key your apps send. Print it with
@@ -29,55 +30,37 @@ On first start it creates `~/.claude-gateway/token`, the key your apps send. Pri
 `http://127.0.0.1:8787/v1` (OpenAI) with that value as the API key. Interactive docs are at
 http://127.0.0.1:8787/docs.
 
-To keep it running in the background instead, `uv run claude-gateway install` registers it
-as a login service; `stop`, `start`, `status`, `logs -f` and `uninstall` manage it from then on.
-
 ## Requirements
 
-- macOS or Linux. Windows can run the server in the foreground only.
+- macOS or Linux.
 - [uv](https://docs.astral.sh/uv/) and Python 3.12+.
 - Claude Code logged in on this machine (`claude` then `/login`) with a plan that includes it.
   The gateway uses the Claude Code CLI bundled with the Agent SDK, so a separate `claude`
   install is not required, but the login is.
 
-## Install
+## Run and stop
 
 ```sh
-git clone https://github.com/<you>/claude-gateway
-cd claude-gateway
-uv sync
-uv run claude-gateway install
-```
-
-`install` registers a login service (launchd on macOS, a systemd user unit on Linux),
-starts it, waits until it answers, and prints the token. From then on it starts at login
-and restarts if it crashes.
-
-To run it in the foreground instead, for a quick try or while developing:
-
-```sh
-uv run claude-gateway
-```
-
-## Manage
-
-```sh
-uv run claude-gateway status        # service state, health, warm processes, sessions, plan window
-uv run claude-gateway logs -f       # follow the log (also -n 200)
-uv run claude-gateway stop          # stop until `start`, or until the next login
-uv run claude-gateway start
+uv run claude-gateway start         # background; prints the token and the log path
+uv run claude-gateway stop
 uv run claude-gateway restart       # after pulling an update
+uv run claude-gateway status        # process, health, warm processes, sessions, plan window
+uv run claude-gateway logs -f       # follow the log (also -n 200)
 uv run claude-gateway token         # the API token clients send
-uv run claude-gateway uninstall     # remove the service; keeps ~/.claude-gateway
+uv run claude-gateway               # foreground instead, logs to the terminal, Ctrl+C stops it
 ```
+
+`start` launches the server detached from your terminal and records its pid in
+`~/.claude-gateway/gateway.pid`; `stop` ends that process cleanly, which also closes the
+Claude Code processes it was holding. It does not come back after a reboot: run `start` again,
+or add that command to whatever you use for login items.
 
 Everything the gateway owns lives in `~/.claude-gateway/`: the `token` file (created on
-first run, mode 600), `gateway.log`, and an empty working directory for the Claude Code
-processes. Delete the token file to rotate it, then restart.
+first run, mode 600), `gateway.log`, `gateway.pid`, and an empty working directory for the
+Claude Code processes. Delete the token file to rotate it, then restart.
 
-Settings are environment variables, read when the server starts. `install` captures the
-ones set in the shell that runs it, so `CLAUDE_GATEWAY_PORT=9000 uv run claude-gateway install`
-sticks.
+Settings are environment variables, read when the server starts, so
+`CLAUDE_GATEWAY_PORT=9000 uv run claude-gateway start` binds another port.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -91,7 +74,7 @@ sticks.
 | `CLAUDE_GATEWAY_MAX_POOLS` | `6` | Distinct system-prompt/tool combinations kept warm. |
 | `CLAUDE_GATEWAY_POOL_TTL` | `300` | Seconds an unused pool keeps its spare. |
 | `CLAUDE_GATEWAY_SESSION_TTL` | `900` | Seconds an idle session keeps its process. |
-| `CLAUDE_GATEWAY_HOME` | `~/.claude-gateway` | Where the token, log and working directory live. |
+| `CLAUDE_GATEWAY_HOME` | `~/.claude-gateway` | Where the token, log, pid file and working directory live. |
 
 ## Use
 
