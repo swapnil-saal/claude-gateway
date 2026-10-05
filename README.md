@@ -79,6 +79,10 @@ sticks.
 
 ## Use
 
+Interactive API docs are served by the gateway itself: **http://127.0.0.1:8787/docs** (Swagger UI,
+with an Authorize button for the token and "Try it out" on every route) and
+http://127.0.0.1:8787/redoc. The raw schema is at `/openapi.json`.
+
 Send the token as `x-api-key` or `Authorization: Bearer`, whichever your client does.
 Model ids are the Anthropic ones (`claude-sonnet-5-5`, `claude-haiku-4-5`, `claude-opus-5-5`,
 `claude-fable-5-1`) or the short aliases `sonnet`, `haiku`, `opus`, `fable`. `GET /v1/models` lists them.

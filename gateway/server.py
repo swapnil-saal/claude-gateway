@@ -17,10 +17,11 @@ import uuid
 from contextlib import asynccontextmanager
 
 from claude_agent_sdk import AssistantMessage, RateLimitEvent, ResultMessage, StreamEvent, TextBlock, ToolResultBlock, ToolUseBlock, UserMessage
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, Request, Security
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 
-from . import config, openai_format
+from . import config, docs, openai_format
 from .anthropic_format import Accumulator, APIError, Shaper, chat_spec, prefill_of, prompt, system_text, validate
 from .pool import Registry
 
@@ -44,7 +45,8 @@ async def lifespan(_app):
     registry.close()
 
 
-app = FastAPI(title="claude-gateway", lifespan=lifespan)
+app = FastAPI(title="claude-gateway", version="0.1.0", description=docs.DESCRIPTION, openapi_tags=docs.TAGS,
+              lifespan=lifespan)
 
 
 @app.exception_handler(APIError)
@@ -57,9 +59,12 @@ def _request_id():
     return "req_gw_" + uuid.uuid4().hex[:24]
 
 
-def auth(request: Request):
-    key = request.headers.get("x-api-key") or request.headers.get("authorization", "").removeprefix("Bearer ").strip()
-    if key != config.TOKEN:
+_api_key = APIKeyHeader(name="x-api-key", auto_error=False, description="The gateway token (`claude-gateway token`)")
+_bearer = HTTPBearer(auto_error=False, description="The same token, as OpenAI clients send it")
+
+
+def auth(key: str | None = Security(_api_key), cred: HTTPAuthorizationCredentials | None = Security(_bearer)):
+    if (key or (cred.credentials if cred else "")) != config.TOKEN:
         raise APIError("authentication_error", "invalid x-api-key")
 
 
@@ -167,7 +172,7 @@ def _sse(ev: dict) -> bytes:
     return f"event: {ev['type']}\ndata: {json.dumps(ev, separators=(',', ':'))}\n\n".encode()
 
 
-@app.post("/v1/messages", dependencies=[Depends(auth)])
+@app.post("/v1/messages", dependencies=[Depends(auth)], **docs.MESSAGES)
 async def messages(request: Request):
     try:
         body = await request.json()
@@ -205,8 +210,8 @@ def _oai_sse(item) -> bytes:
     return f"data: {data}\n\n".encode()
 
 
-@app.post("/v1/chat/completions", dependencies=[Depends(auth)])
-@app.post("/chat/completions", dependencies=[Depends(auth)])     # base URL given without /v1
+@app.post("/v1/chat/completions", dependencies=[Depends(auth)], **docs.CHAT)
+@app.post("/chat/completions", dependencies=[Depends(auth)], include_in_schema=False)   # base URL without /v1
 async def chat_completions(request: Request):
     try:
         raw = await request.json()
@@ -244,14 +249,14 @@ async def chat_completions(request: Request):
                              headers={**headers, "cache-control": "no-cache"})
 
 
-@app.post("/v1/messages/count_tokens", dependencies=[Depends(auth)])
+@app.post("/v1/messages/count_tokens", dependencies=[Depends(auth)], **docs.COUNT_TOKENS)
 async def count_tokens(request: Request):
     body = await request.json()
     text = json.dumps(body.get("messages", [])) + system_text(body.get("system")) + json.dumps(body.get("tools", []))
     return {"input_tokens": max(1, len(text) // 4)}
 
 
-@app.delete("/v1/sessions/{session_id}", dependencies=[Depends(auth)])
+@app.delete("/v1/sessions/{session_id}", dependencies=[Depends(auth)], **docs.END_SESSION)
 async def end_session(session_id: str):
     return {"id": session_id, "deleted": registry.drop_session(session_id)}
 
@@ -262,15 +267,15 @@ def _model(mid, name):                         # Anthropic and OpenAI model obje
             "created_at": "2026-01-01T00:00:00Z", "created": 1767225600, "owned_by": "anthropic"}
 
 
-@app.get("/v1/models", dependencies=[Depends(auth)])
-@app.get("/models", dependencies=[Depends(auth)])
+@app.get("/v1/models", dependencies=[Depends(auth)], **docs.MODELS)
+@app.get("/models", dependencies=[Depends(auth)], include_in_schema=False)
 async def models():
     data = [_model(*m) for m in config.MODELS]
     return {"object": "list", "data": data, "has_more": False, "first_id": data[0]["id"], "last_id": data[-1]["id"]}
 
 
-@app.get("/v1/models/{model_id}", dependencies=[Depends(auth)])
-@app.get("/models/{model_id}", dependencies=[Depends(auth)])
+@app.get("/v1/models/{model_id}", dependencies=[Depends(auth)], **docs.MODEL)
+@app.get("/models/{model_id}", dependencies=[Depends(auth)], include_in_schema=False)
 async def model(model_id: str):
     for mid, name in config.MODELS:
         if mid == model_id:
@@ -278,19 +283,19 @@ async def model(model_id: str):
     raise APIError("not_found_error", f"model: {model_id}")
 
 
-@app.get("/usage", dependencies=[Depends(auth)])
+@app.get("/usage", dependencies=[Depends(auth)], **docs.USAGE)
 async def usage():
     return {"rate_limits": rate_limits, "concurrency": config.CONCURRENCY,
             "busy_slots": config.CONCURRENCY - slots._value, **registry.stats()}
 
 
-@app.get("/health")
+@app.get("/health", **docs.HEALTH)
 async def health():
     return {"ok": True, "warm_spares": sum(len(p.idle) for p in registry.pools.values())}
 
 
 # ---------------------------------------------------------------- agent runs
-@app.post("/v1/agent/run", dependencies=[Depends(auth)])
+@app.post("/v1/agent/run", dependencies=[Depends(auth)], **docs.AGENT_RUN)
 async def agent_run(request: Request):
     """A whole Claude Code agent loop. Body:
     prompt (str | content blocks, required), model, system (replaces Claude Code's prompt) or
