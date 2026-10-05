@@ -19,7 +19,7 @@ share or resell a subscription, and it must never be exposed to the internet.
 ## Quick start
 
 ```sh
-git clone https://github.com/<you>/claude-gateway && cd claude-gateway
+git clone https://github.com/swapnil-saal/claude-gateway && cd claude-gateway
 uv sync
 uv run claude-gateway start      # runs in the background
 uv run claude-gateway stop       # ...until this
